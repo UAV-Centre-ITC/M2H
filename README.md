@@ -62,6 +62,15 @@ The M2H architecture is built around a shared Vision Transformer (ViT) encoder b
 | M2H-small (ours) | 0.16 | 0.18 | 0.15 | 0.17 | 42 |
 | **M2H (ours)** | **0.11** | **0.14** | **0.10** | **0.13** | **30** |
 
+**Ablation on NYUDv2**
+
+| Ablation | Semseg mIoU ↑ | Depth RMSE ↓ | Normals mean ↓ | Boundary odsF ↑ |
+| --- | --- | --- | --- | --- |
+| MHA (replace WMCA) | 50.94 | 0.5204 | 19.86 | 77.74 |
+| w/o WMCA | 51.67 | 0.5202 | 18.17 | 72.45 |
+| w/o GGFM | 56.92 | 0.5087 | 20.71 | 79.29 |
+
+_Results reproduced from Tables IV–VI in the paper._
 
 M2H produces accurate and temporally stable predictions suitable for real-time robotic perception and mapping pipelines.
 
@@ -76,13 +85,22 @@ M2H produces accurate and temporally stable predictions suitable for real-time r
 - CUDA-capable GPU recommended; CPU mode supported with reduced throughput.
 
 ## Setup
-1. Clone into your catkin workspace `src/` directory.
-2. Install Python dependencies:
+1. Install Git LFS (once per machine) and enable it for your Git environment:
+   ```bash
+   sudo apt install git-lfs   # or brew install git-lfs on macOS
+   git lfs install
+   ```
+2. Clone this repository into your catkin workspace `src/` directory.
+3. Pull the large checkpoints tracked via Git LFS:
+   ```bash
+   git lfs pull
+   ```
+   This downloads the pretrained weights to `src/m2h/scripts/checkpoints/` (e.g., `m2h_indoor.pt`, `m2h_nyudv2.pt`).
+4. Install Python dependencies:
    ```bash
    pip install -r requirements.txt  # TODO: create file
    ```
-3. Retrieve model weights (instructions pending).
-4. Build the workspace:
+5. Build the workspace:
    ```bash
    catkin build
    source devel/setup.bash
@@ -101,7 +119,7 @@ The node subscribes to the RGB stream and publishes semantically-colored segment
 | `image_topic` | `/camera/image_raw` | Source RGB topic. |
 | `image_depth_topic` | `/camera/image_depth` | Depth prediction output topic. |
 | `image_semantic_topic` | `/camera/image_segmented` | Semantic prediction output topic. |
-| `model_path` | `$(find m2h)/scripts/checkpoints/val_model_epoch_14_rmse_0.5422_miou_0.6969.pt` | Path to the checkpoint weights. |
+| `model_path` | `$(find m2h)/scripts/checkpoints/m2h_indoor.pt` | Path to the checkpoint weights. |
 | `feed_width` / `feed_height` | `224` | Network input resolution prior to inference. |
 | `skip_frequency` | `7` | Process every `n`th frame (set to `1` to use every frame). |
 | `arch_name` | `vit_small` | DINOv2 backbone variant (`vit_small`, `vit_base`, `vit_large`, `vit_giant2`). |

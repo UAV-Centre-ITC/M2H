@@ -12,11 +12,7 @@ devel/
 logs/
 
 # Model checkpoints and large artifacts
-scripts/checkpoints/
-!scripts/checkpoints/.gitkeep
-*.pth
-*.pt
-*.onnx
+# (tracked via Git LFS, so keep directory under version control)
 
 # Editor configs
 .vscode/
