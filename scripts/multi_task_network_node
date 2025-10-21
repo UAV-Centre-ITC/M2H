@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 
-import rospy
 import os
 import sys
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from functools import partial
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge, CvBridgeError
+
 import cv2
 import numpy as np
-from m2h import *
+import rospkg
+import rospy
+import torch
+import torch.nn.functional as F
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Image
+pkg_path = rospkg.RosPack().get_path('m2h')
+core_src = os.path.join(pkg_path, 'src')
+if core_src not in sys.path:
+    sys.path.insert(0, core_src)
+
+from m2h_core import ModelConfig, build_model
 import yaml
 from yaml.loader import SafeLoader
 from scipy.io import loadmat
@@ -99,7 +104,7 @@ class MultiTaskNetworkNode:
         
         # Load configuration from ROS params
         script_dir = os.path.dirname(os.path.realpath(__file__))
-        default_checkpoint_name = 'val_model_epoch_14_rmse_0.5422_miou_0.6969.pt'
+        default_checkpoint_name = 'm2h_indoor.pt'
         default_checkpoint_path = os.path.join(script_dir, 'checkpoints', default_checkpoint_name)
 
         self.image_topic = rospy.get_param('~image_topic', '/camera/image_raw')
@@ -116,6 +121,12 @@ class MultiTaskNetworkNode:
         min_depth = float(rospy.get_param('~min_depth', 0.001))
         max_depth = float(rospy.get_param('~max_depth', 10.0))
         arch_name = rospy.get_param('~arch_name', 'vit_small')
+        model_variant = rospy.get_param('~model_variant', 'default')
+        num_classes = int(rospy.get_param('~num_classes', 41))
+
+        if model_variant == 'lightweight':
+            default_checkpoint_name = 'm2h_nyudv2.pt'
+            default_checkpoint_path = os.path.join(script_dir, 'checkpoints', default_checkpoint_name)
 
         legacy_folder = rospy.get_param('~load_weights_folder', '')
         checkpoint_name = rospy.get_param('~checkpoint_name', default_checkpoint_name)
@@ -124,64 +135,20 @@ class MultiTaskNetworkNode:
             model_path_param = os.path.join(legacy_folder, checkpoint_name)
         self.model_path = model_path_param or default_checkpoint_path
 
-        # Initialize the network
-        backbone_repo_map = {
-            "vit_small": "dinov2_vits14",
-            "vit_base": "dinov2_vitb14",
-            "vit_large": "dinov2_vitl14",
-            "vit_giant2": "dinov2_vitg14",
-        }
-        hub_id = backbone_repo_map.get(arch_name, backbone_repo_map["vit_small"])
-        if arch_name not in backbone_repo_map:
-            rospy.logwarn("Unknown arch_name '%s', falling back to 'vit_small'." % arch_name)
-
-        backbone = torch.hub.load('facebookresearch/dinov2', hub_id)
-
-        mlt_head = MLTHead(
-                            # in_channels=[backbone.embed_dim] * 4,
-                            # channels=256,
-                            channels=256,
-                            embed_dims=backbone.embed_dim,
-                            post_process_channels=[backbone.embed_dim // 2 ** (3 - i) for i in range(4)],
-                            readout_type="project",
-                            min_depth=min_depth,
-                            max_depth=max_depth,
-                            num_classes = 41,
-                            act_layer=nn.GELU
-                        )
-        
-        # aux_head = SegAuxAdaptHead(
-        #             in_channels=[backbone.embed_dim] * 4,
-        #             channels=64,
-        #             embed_dims=backbone.embed_dim,
-        #             post_process_channels=[backbone.embed_dim // 2 ** (3 - i) for i in range(4)],
-        #             readout_type="project",
-        #             min_depth=min_depth,
-        #             max_depth=max_depth,
-        #             num_classes = 41,
-        #             act_layer=nn.GELU
-        #         )
-
-
-        out_index = {
-                "vit_small": [2, 5, 8, 11],
-                "vit_base": [2, 5, 8, 11],
-                "vit_large": [4, 11, 17, 23],
-                "vit_giant2": [9, 19, 29, 39],
-            }[arch_name]
-
-        # self.model = DepthEncoderDecoder(backbone=backbone, mlt_head=mlt_head, aux_head=aux_head)
-        self.model = DepthEncoderDecoder(backbone=backbone, mlt_head=mlt_head)
-            
-        self.model.backbone.forward = partial(
-                backbone.get_intermediate_layers,
-                n=out_index,
-                reshape=True,
-                return_class_token=True,
-                norm=False,
-            )
-
-        self.model.backbone.register_forward_pre_hook(lambda _, x: CenterPadding(backbone.patch_size)(x[0]))
+        # Initialize the network using the modular builder
+        cfg = ModelConfig(
+            arch=arch_name,
+            flavor=model_variant,
+            min_depth=min_depth,
+            max_depth=max_depth,
+            num_classes=num_classes,
+        )
+        try:
+            self.model = build_model(cfg)
+        except ValueError as exc:
+            rospy.logerr("Model build failed: %s", exc)
+            rospy.signal_shutdown("Unable to initialise M2H model")
+            raise
         ##############
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # if torch.cuda.device_count() > 1:
@@ -203,6 +170,13 @@ class MultiTaskNetworkNode:
 
         self.model.eval() # Set the model to evaluation mode
         self.bridge = CvBridge()
+
+        rospy.loginfo(
+            "Initialised M2H model (variant=%s, arch=%s) on %s",
+            model_variant,
+            arch_name,
+            self.device,
+        )
 
         # ROS subscribers and publishers
         self.subscriber = rospy.Subscriber(self.image_topic, Image, self.callback, queue_size=1)

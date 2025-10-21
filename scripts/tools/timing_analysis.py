@@ -1,5 +1,10 @@
-from m2h.scripts.m2h import *
+from functools import partial
+
 import numpy as np
+import torch
+import torch.nn as nn
+
+from m2h_core.models import CenterPadding, FullHead as MLTHead, FullModel as DepthEncoderDecoder
 
 min_depth, max_depth = 0.001, 10
 arch_name="vit_small" # vit_base
