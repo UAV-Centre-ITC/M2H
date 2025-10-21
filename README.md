@@ -132,9 +132,10 @@ Use `model_variant:=lightweight` to run the smaller M2H head when GPU budget is 
 - `data/`: Color maps and small auxiliary resources.
 
 ## Roadmap
-- Add automated weight download tooling.
-- Provide example bag / RViz configuration.
-- Release compatible Mono-Hydra version. 
+- Bundle a lightweight demo (sample bag + RViz config) to showcase segmentation/depth outputs.
+- Mono-Hydra to ship a compatible release and documentation.
+- Release the m2h_perf lightweight weights alongside the default model.
+- Export ONNX variants of both model flavors and add tests/examples for running them.
 
 
 ## Citation
