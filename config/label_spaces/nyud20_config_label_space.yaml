@@ -1,0 +1,28 @@
+---
+total_semantic_labels: 21
+dynamic_labels: [19, 20]
+invalid_labels: []
+object_labels: [4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+surface_places_labels: [1, 2, 3, 4]
+label_names:
+  - {label: 0, name: unknown}
+  - {label: 1, name: wall}
+  - {label: 2, name: floor}
+  - {label: 3, name: ceiling}
+  - {label: 4, name: door}
+  - {label: 5, name: stairs}
+  - {label: 6, name: structure}
+  - {label: 7, name: shelf}
+  - {label: 8, name: plant}
+  - {label: 9, name: bed}
+  - {label: 10, name: storage}
+  - {label: 11, name: table}
+  - {label: 12, name: chair}
+  - {label: 13, name: wall_decoration}
+  - {label: 14, name: couch}
+  - {label: 15, name: light}
+  - {label: 16, name: appliance}
+  - {label: 17, name: thing}
+  - {label: 18, name: deformable}
+  - {label: 19, name: dynamic-nonhuman}
+  - {label: 20, name: human}

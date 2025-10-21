@@ -1,0 +1,23 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+.env/
+
+# Catkin / ROS artifacts
+build/
+devel/
+logs/
+
+# Model checkpoints and large artifacts
+scripts/checkpoints/
+!scripts/checkpoints/.gitkeep
+*.pth
+*.pt
+*.onnx
+
+# Editor configs
+.vscode/
+.idea/

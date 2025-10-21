@@ -1,0 +1,41 @@
+<launch>
+<arg name="image_topic" default="/camera/color/image_raw"/>
+<arg name="model_path" default="$(find m2h)/scripts/checkpoints/m2h_indoor.pt"/>
+<arg name="feed_width" default="224"/>
+<arg name="feed_height" default="224"/>
+<arg name="skip_frequency" default="7"/>
+<arg name="arch_name" default="vit_small"/>
+<rosparam command="load" file="$(find m2h)/config/fusion_params.yaml"/>
+
+<node pkg="m2h" type="multi_task_network_node" name="m2h" output="screen" respawn="true">
+        <!-- ITC dataset-->
+    	<!-- <param name="image_topic" value="/cam0/image_raw"/> -->
+    	<!-- <param name="image_topic" value="/zed/zed_node/rgb/rect/image"/> -->
+		<!-- Pass the argument to a parameter -->
+		<param name="image_topic" value="$(arg image_topic)"/>
+    	<param name="image_depth_topic" value="/camera/depth_cam/image_raw"/>
+    	<param name="image_semantic_topic" value="/camera/seg_cam/image_raw"/>
+    	<param name="model_path" value="$(arg model_path)"/>
+    	<param name="feed_width" value="$(arg feed_width)"/>
+    	<param name="feed_height" value="$(arg feed_height)"/>
+    	<param name="skip_frequency" value="$(arg skip_frequency)"/>
+    	<param name="arch_name" value="$(arg arch_name)"/>
+     	<param name="fx" value="615.0"/>
+		<param name="fy" value="615.0"/>
+		<param name="cx" value="320.0"/>
+		<param name="cy" value="240.0"/>
+		<!-- or let it read from CameraInfo -->
+		<param name="camera_info_topic" value="/camera/color/camera_info"/>
+
+
+    	<!-- tesse -->
+    	<!-- <param name="image_topic" value="/tesse/left_cam/rgb/image_raw"/>
+    	<param name="image_depth_topic" value="/tesse/depth_cam/mono/image_raw"/>
+    	<param name="image_semantic_topic" value="/tesse/depth_cam/mono/image_raw"/> -->
+       
+        <!-- Path to color mat and class name files -->
+        <param name="color20_mat_filepath" value="$(find m2h)/data/color_config20.mat" />
+        <param name="objects40_csv_mapping" value="$(find m2h)/config/colors/nyud40_config.yaml" />
+</node>
+<!-- <node pkg="m2h" type="tools/clean_and_fit_planes" name="clean_pc_node" output="screen" /> -->
+</launch>

@@ -1,0 +1,13 @@
+fx: 615.0        # replace with CameraInfo K[0]
+fy: 615.0        # K[4]
+cx: 320.0        # K[2]
+cy: 240.0        # K[5]
+odom_topic: /kimera_vio_ros/odometry
+
+# Fusion
+z_consistency_thresh: 0.30
+depth_process_var: 0.01
+depth_meas_var: 0.01
+dirichlet_beta: 0.9
+dirichlet_kappa: 5.0
+use_kalman_depth: false

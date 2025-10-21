@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+
+import rospy
+import ros_numpy
+import numpy as np
+import threading
+from sensor_msgs.msg import PointCloud2
+from concurrent.futures import ThreadPoolExecutor
+
+class PointCloudCleaner:
+    def __init__(self):
+        # Initialize the ROS node
+        rospy.init_node("pointcloud_cleaner")
+
+        # Initialize the publisher for the cleaned point cloud
+        self.pub = rospy.Publisher("/semantic_pointcloud", PointCloud2, queue_size=10)
+
+        # Subscribe to the point cloud topic
+        rospy.Subscriber("/semantic_pointcloud_org", PointCloud2, self.pointcloud_callback)
+
+    def pointcloud_callback(self, msg):
+        # Start a new thread for processing the point cloud
+        threading.Thread(target=self.process_point_cloud_thread, args=(msg,)).start()
+
+    def process_point_cloud_thread(self, msg):
+        # Convert the PointCloud2 message to a NumPy structured array
+        pc = ros_numpy.numpify(msg)
+        pc = ros_numpy.point_cloud2.split_rgb_field(pc)  # Split the RGB field into separate channels
+
+        # Extract points and colors and flatten them to 1D arrays
+        points = np.vstack((pc['x'].flatten(), pc['y'].flatten(), pc['z'].flatten())).T
+        rgb = np.vstack((pc['r'].flatten(), pc['g'].flatten(), pc['b'].flatten())).T  # Flattened RGB in [0-255]
+
+        # Process the point cloud
+        final_points, final_colors = self.process_point_cloud(points, rgb)
+
+        num_points = final_points.shape[0]
+        num_colors = final_colors.shape[0]
+
+        # If there's a mismatch, you need to trim the larger array to match the smaller one
+        if num_points != num_colors:
+            min_size = min(num_points, num_colors)
+            final_points = final_points[:min_size]
+            final_colors = final_colors[:min_size]
+        # Pack RGB into a single field
+        packed_rgb = ((final_colors[:, 0].astype(np.uint32) << 16) | 
+                    (final_colors[:, 1].astype(np.uint32) << 8) | 
+                    (final_colors[:, 2].astype(np.uint32)))
+
+        # Convert the final points and packed RGB into a structured array for PointCloud2
+        final_data = np.zeros(final_points.shape[0], dtype=[
+            ('x', np.float32),
+            ('y', np.float32),
+            ('z', np.float32),
+            ('rgb', np.uint32)  # Use packed RGB
+        ])
+        final_data['x'] = final_points[:, 0]
+        final_data['y'] = final_points[:, 1]
+        final_data['z'] = final_points[:, 2]
+        final_data['rgb'] = packed_rgb
+
+        # Convert the cleaned data back to PointCloud2 and publish
+        try:
+            cleaned_msg = ros_numpy.msgify(PointCloud2, final_data, stamp=msg.header.stamp, frame_id=msg.header.frame_id)
+            self.pub.publish(cleaned_msg)
+            # rospy.loginfo("Published cleaned point cloud with consistent colors.")
+        except Exception as e:
+            rospy.logerr(f"Error converting point cloud to ROS message: {e}")
+
+    def process_point_cloud(self, points, colors):
+        # Filter points within the height range (2m to 8m)
+        mask = (points[:, 2] >= 0.1) & (points[:, 2] <= 8.0)
+        filtered_points = points[mask]
+        filtered_colors = colors[mask]  # Mask both points and colors
+
+        # Define semantic class colors for filtering (still in [0, 255] format)
+        floor_color = np.array([191, 191, 181], dtype=np.uint8)     # Floor color
+        ceiling_color = np.array([59, 163, 236], dtype=np.uint8)    # Ceiling color
+        door_color = np.array([246, 112, 136], dtype=np.uint8)      # Door color
+        wall_deco_color = np.array([246, 107, 171], dtype=np.uint8) # Wall decoration color
+        wall_color = np.array([0, 102, 51], dtype=np.uint8)         # Wall color
+
+        # Create masks for each semantic class based on color
+        floor_mask = np.all(filtered_colors == floor_color, axis=1)
+        ceiling_mask = np.all(filtered_colors == ceiling_color, axis=1)
+        door_mask = np.all(filtered_colors == door_color, axis=1)
+        wall_deco_mask = np.all(filtered_colors == wall_deco_color, axis=1)
+        wall_mask = np.all(filtered_colors == wall_color, axis=1)
+
+        # Extract filtered points for floor, ceiling, doors, wall decoration, and walls
+        floor_points = filtered_points[floor_mask]
+        ceiling_points = filtered_points[ceiling_mask]
+        door_points = filtered_points[door_mask]
+        wall_deco_points = filtered_points[wall_deco_mask]
+        wall_points = filtered_points[wall_mask]
+
+        # Fit planes using RANSAC for floor, ceiling, doors, and wall decoration
+        floor_plane_model = self.fit_plane(floor_points)
+        ceiling_plane_model = self.fit_plane(ceiling_points)
+        door_plane_model = self.fit_plane(door_points)
+        wall_deco_plane_model = self.fit_plane(wall_deco_points)
+
+        # Project points onto their respective planes
+        projected_floor_points = self.project_points_onto_plane(floor_points, floor_plane_model)
+        projected_ceiling_points = self.project_points_onto_plane(ceiling_points, ceiling_plane_model)
+        projected_door_points = self.project_points_onto_plane(door_points, door_plane_model)
+        projected_wall_deco_points = self.project_points_onto_plane(wall_deco_points, wall_deco_plane_model)
+
+        # Patchify the wall points and fit planes to each patch
+        wall_patches = self.patchify_wall(wall_points, num_patches_x=8, num_patches_y=8)
+
+        # Fit planes to each patch using parallel processing
+        def fit_plane(patch):
+            return self.fit_plane(patch) if len(patch) > 0 else None
+
+        with ThreadPoolExecutor() as executor:
+            wall_plane_models = list(executor.map(fit_plane, wall_patches))
+
+        # Project points in each patch onto their respective plane
+        projected_wall_points = []
+        for patch, model in zip(wall_patches, wall_plane_models):
+            if model is not None:
+                projected_patch_points = self.project_points_onto_plane(patch, model)
+                projected_wall_points.append(projected_patch_points)
+
+        projected_wall_points = np.vstack(projected_wall_points) if projected_wall_points else np.empty((0, 3))
+
+        # Combine the remaining points and projected points
+        remaining_points = filtered_points[~(floor_mask | ceiling_mask | door_mask | wall_deco_mask | wall_mask)]
+        final_combined_points = np.vstack((
+            remaining_points, 
+            projected_floor_points, 
+            projected_ceiling_points, 
+            projected_door_points, 
+            projected_wall_deco_points, 
+            projected_wall_points
+        ))
+        final_combined_colors = np.vstack((
+            filtered_colors[~(floor_mask | ceiling_mask | door_mask | wall_deco_mask | wall_mask)],
+            filtered_colors[floor_mask],
+            filtered_colors[ceiling_mask],
+            filtered_colors[door_mask],
+            filtered_colors[wall_deco_mask],
+            filtered_colors[wall_mask]
+        ))
+
+        return final_combined_points, final_combined_colors
+
+    # Patchify function
+    def patchify_wall(self, points, num_patches_x=4, num_patches_y=4):
+        x_min, y_min = np.min(points[:, 0]), np.min(points[:, 1])
+        x_max, y_max = np.max(points[:, 0]), np.max(points[:, 1])
+
+        patch_width = (x_max - x_min) / num_patches_x
+        patch_height = (y_max - y_min) / num_patches_y
+
+        patches = []
+        for i in range(num_patches_x):
+            for j in range(num_patches_y):
+                x_start = x_min + i * patch_width
+                x_end = x_start + patch_width
+                y_start = y_min + j * patch_height
+                y_end = y_start + patch_height
+
+                # Filter points that belong to the current patch
+                patch_mask = (points[:, 0] >= x_start) & (points[:, 0] < x_end) & \
+                            (points[:, 1] >= y_start) & (points[:, 1] < y_end)
+                patches.append(points[patch_mask])
+        
+        return patches
+
+    def fit_plane(self, points):
+        if len(points) == 0:
+            return None
+        # Use RANSAC to fit a plane to the points (without Open3D)
+        centroid = np.mean(points, axis=0)
+        centered_points = points - centroid
+        cov_matrix = np.dot(centered_points.T, centered_points)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+        normal = eigenvectors[:, 0]  # Normal is the eigenvector with the smallest eigenvalue
+        d = -np.dot(normal, centroid)
+        return np.append(normal, d)
+
+    def project_points_onto_plane(self, points, plane_model):
+        if plane_model is not None:
+            a, b, c, d = plane_model
+            normal = np.array([a, b, c])
+            normal_length = np.linalg.norm(normal)
+            distances = (np.dot(points, normal) + d) / normal_length
+            projected_points = points - np.outer(distances, normal / normal_length)
+            return projected_points
+        return points  # Return original points if no model is available
+
+def main():
+    cleaner = PointCloudCleaner()
+    rospy.spin()
+
+if __name__ == '__main__':
+    main()

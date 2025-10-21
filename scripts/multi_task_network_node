@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+
+import rospy
+import os
+import sys
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from functools import partial
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge, CvBridgeError
+import cv2
+import numpy as np
+from m2h import *
+import yaml
+from yaml.loader import SafeLoader
+from scipy.io import loadmat
+import collections
+from torch.autograd import Variable
+from concurrent.futures import ThreadPoolExecutor
+from torchvision import transforms
+import time 
+
+def colorEncode(labelmap, colors, mode='RGB'):
+    labelmap = labelmap.astype('int')
+    labelmap_rgb = np.zeros((labelmap.shape[0], labelmap.shape[1], 3),
+                            dtype=np.uint8)
+    for label in unique(labelmap):
+        if label < 0:
+            continue
+        labelmap_rgb += (labelmap == label)[:, :, np.newaxis] * \
+            np.tile(colors[label],
+                    (labelmap.shape[0], labelmap.shape[1], 1))
+
+    if mode == 'BGR':
+        return labelmap_rgb[:, :, ::-1]
+    else:
+        return labelmap_rgb
+        
+def as_numpy(obj):
+    if isinstance(obj, collections.abc.Sequence):
+        return [as_numpy(v) for v in obj]
+    elif isinstance(obj, collections.abc.Mapping):
+        return {k: as_numpy(v) for k, v in obj.items()}
+    elif isinstance(obj, Variable):
+        return obj.data.cpu().numpy()
+    elif torch.is_tensor(obj):
+        return obj.cpu().numpy()
+    else:
+        return np.array(obj)
+    
+def unique(ar, return_index=False, return_inverse=False, return_counts=False):
+    ar = np.asanyarray(ar).flatten()
+
+    optional_indices = return_index or return_inverse
+    optional_returns = optional_indices or return_counts
+
+    if ar.size == 0:
+        if not optional_returns:
+            ret = ar
+        else:
+            ret = (ar,)
+            if return_index:
+                ret += (np.empty(0, np.bool),)
+            if return_inverse:
+                ret += (np.empty(0, np.bool),)
+            if return_counts:
+                ret += (np.empty(0, np.intp),)
+        return ret
+    if optional_indices:
+        perm = ar.argsort(kind='mergesort' if return_index else 'quicksort')
+        aux = ar[perm]
+    else:
+        ar.sort()
+        aux = ar
+    flag = np.concatenate(([True], aux[1:] != aux[:-1]))
+
+    if not optional_returns:
+        ret = aux[flag]
+    else:
+        ret = (aux[flag],)
+        if return_index:
+            ret += (perm[flag],)
+        if return_inverse:
+            iflag = np.cumsum(flag) - 1
+            inv_idx = np.empty(ar.shape, dtype=np.intp)
+            inv_idx[perm] = iflag
+            ret += (inv_idx,)
+        if return_counts:
+            idx = np.concatenate(np.nonzero(flag) + ([ar.size],))
+            ret += (np.diff(idx),)
+    return ret
+           
+# ROS Node for Multi Task Network
+class MultiTaskNetworkNode:
+    def __init__(self):
+        rospy.init_node('multi_task_network_node')
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        
+        # Load configuration from ROS params
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        default_checkpoint_name = 'val_model_epoch_14_rmse_0.5422_miou_0.6969.pt'
+        default_checkpoint_path = os.path.join(script_dir, 'checkpoints', default_checkpoint_name)
+
+        self.image_topic = rospy.get_param('~image_topic', '/camera/image_raw')
+        self.image_depth_topic = rospy.get_param('~image_depth_topic', '/camera/image_depth')
+        self.image_semantic_topic = rospy.get_param('~image_semantic_topic', '/camera/image_segmented')
+        feed_width_param = int(rospy.get_param('~feed_width', 224))
+        feed_height_param = int(rospy.get_param('~feed_height', 224))
+        self.feed_width = max(1, feed_width_param)
+        self.feed_height = max(1, feed_height_param)
+        skip_frequency_param = int(rospy.get_param('~skip_frequency', 7))
+        if skip_frequency_param < 1:
+            rospy.logwarn("skip_frequency must be >= 1; received %d. Using 1 instead." % skip_frequency_param)
+        self.skip_frequency = max(1, skip_frequency_param)
+        min_depth = float(rospy.get_param('~min_depth', 0.001))
+        max_depth = float(rospy.get_param('~max_depth', 10.0))
+        arch_name = rospy.get_param('~arch_name', 'vit_small')
+
+        legacy_folder = rospy.get_param('~load_weights_folder', '')
+        checkpoint_name = rospy.get_param('~checkpoint_name', default_checkpoint_name)
+        model_path_param = rospy.get_param('~model_path', '')
+        if not model_path_param and legacy_folder:
+            model_path_param = os.path.join(legacy_folder, checkpoint_name)
+        self.model_path = model_path_param or default_checkpoint_path
+
+        # Initialize the network
+        backbone_repo_map = {
+            "vit_small": "dinov2_vits14",
+            "vit_base": "dinov2_vitb14",
+            "vit_large": "dinov2_vitl14",
+            "vit_giant2": "dinov2_vitg14",
+        }
+        hub_id = backbone_repo_map.get(arch_name, backbone_repo_map["vit_small"])
+        if arch_name not in backbone_repo_map:
+            rospy.logwarn("Unknown arch_name '%s', falling back to 'vit_small'." % arch_name)
+
+        backbone = torch.hub.load('facebookresearch/dinov2', hub_id)
+
+        mlt_head = MLTHead(
+                            # in_channels=[backbone.embed_dim] * 4,
+                            # channels=256,
+                            channels=256,
+                            embed_dims=backbone.embed_dim,
+                            post_process_channels=[backbone.embed_dim // 2 ** (3 - i) for i in range(4)],
+                            readout_type="project",
+                            min_depth=min_depth,
+                            max_depth=max_depth,
+                            num_classes = 41,
+                            act_layer=nn.GELU
+                        )
+        
+        # aux_head = SegAuxAdaptHead(
+        #             in_channels=[backbone.embed_dim] * 4,
+        #             channels=64,
+        #             embed_dims=backbone.embed_dim,
+        #             post_process_channels=[backbone.embed_dim // 2 ** (3 - i) for i in range(4)],
+        #             readout_type="project",
+        #             min_depth=min_depth,
+        #             max_depth=max_depth,
+        #             num_classes = 41,
+        #             act_layer=nn.GELU
+        #         )
+
+
+        out_index = {
+                "vit_small": [2, 5, 8, 11],
+                "vit_base": [2, 5, 8, 11],
+                "vit_large": [4, 11, 17, 23],
+                "vit_giant2": [9, 19, 29, 39],
+            }[arch_name]
+
+        # self.model = DepthEncoderDecoder(backbone=backbone, mlt_head=mlt_head, aux_head=aux_head)
+        self.model = DepthEncoderDecoder(backbone=backbone, mlt_head=mlt_head)
+            
+        self.model.backbone.forward = partial(
+                backbone.get_intermediate_layers,
+                n=out_index,
+                reshape=True,
+                return_class_token=True,
+                norm=False,
+            )
+
+        self.model.backbone.register_forward_pre_hook(lambda _, x: CenterPadding(backbone.patch_size)(x[0]))
+        ##############
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # if torch.cuda.device_count() > 1:
+        #     print("Using", torch.cuda.device_count(), "GPUs!")
+        #     self.model = nn.DataParallel(self.model)
+            
+        torch.backends.cudnn.benchmark = True
+        self.model = self.model.to(self.device)
+
+        if os.path.isdir(self.model_path):
+            self.model_path = os.path.join(self.model_path, checkpoint_name)
+
+        if self.model_path and os.path.exists(self.model_path):
+            checkpoint = torch.load(self.model_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+            self.model.load_state_dict(checkpoint)
+            rospy.loginfo("Loaded weights from %s" % self.model_path)
+        else:
+            rospy.logwarn("No weights found at %s, running with random initialization." % self.model_path)
+
+        self.model.eval() # Set the model to evaluation mode
+        self.bridge = CvBridge()
+
+        # ROS subscribers and publishers
+        self.subscriber = rospy.Subscriber(self.image_topic, Image, self.callback, queue_size=1)
+        self.semantic_pub = rospy.Publisher(self.image_semantic_topic, Image, queue_size=1)
+        self.depth_pub = rospy.Publisher(self.image_depth_topic, Image, queue_size=1)
+
+        color20_mat_filepath = rospy.get_param("~color20_mat_filepath")
+        mapping_file_path = rospy.get_param("~objects40_csv_mapping")
+        self.transform = self.make_transform()
+
+        self.mapping_dict = {}
+        # Open the file and load the file
+        with open(mapping_file_path) as f:
+            data = yaml.load(f, Loader=SafeLoader)
+            for key in data:
+                if "labels" in key:
+                    x = key.split('/')
+                    for i in data[key]:
+                        self.mapping_dict[i] = int(x[1])
+        
+
+        self.colors = loadmat(color20_mat_filepath)['colors']
+        rospy.loginfo("Loaded color map and label mapping (%d classes)." % len(self.mapping_dict))
+        rospy.loginfo(
+            "Subscribed to %s -> publishing depth:%s, semantic:%s | model:%s | resize:%dx%d | skip:%d"
+            % (
+                self.image_topic,
+                self.image_depth_topic,
+                self.image_semantic_topic,
+                self.model_path,
+                self.feed_width,
+                self.feed_height,
+                self.skip_frequency,
+            )
+        )
+
+        self.frame_count = 0
+        rospy.loginfo("Initialization Done. Running Inference .....")
+    
+    def make_transform(self) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.Normalize(
+                mean = [0.4803, 0.4800, 0.4723],
+                std=[0.2594, 0.2573, 0.2641]
+                # mean=[0.4058, 0.3597, 0.3467], 
+                # std=[0.2822, 0.2802, 0.2799]
+            ),
+        ])
+
+    def callback(self, data):
+        # Convert ROS Image message to OpenCV image
+        if self.frame_count % self.skip_frequency == 0:
+            self.executor.submit(self.process_image, data)
+        self.frame_count += 1	
+
+    def process_image(self, data):
+        start_time = time.time()  # start timer
+        try:
+            image = np.array(self.bridge.imgmsg_to_cv2(data, "bgr8"))
+        except CvBridgeError as e:
+            rospy.logerr(e)
+            return
+        
+        with torch.no_grad():
+            original_height, original_width, _ = image.shape
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            raw_img = np.transpose(rgb_image, (2, 0, 1))
+            tensor_image = torch.from_numpy(raw_img).float().to(self.device)
+            tensor_image = (tensor_image / 255.0).unsqueeze(0)
+
+            # Resize tensor_image to the required input size for the model
+            tensor_image = torch.nn.functional.interpolate(
+                tensor_image, (self.feed_width, self.feed_height), mode="bilinear", align_corners=False
+            )
+
+            depth_out, semantic_out, _, _= self.model(self.transform(tensor_image))
+            end_time = time.time()
+            inference_time = end_time - start_time
+            fps = 1.0 / inference_time if inference_time > 0 else 0
+            rospy.loginfo("Inference Time: {:.3f} sec, FPS: {:.2f}".format(inference_time, fps))
+
+            depth_image = F.interpolate(depth_out, size=(original_height, original_width), mode='bilinear', align_corners=False).squeeze(0)
+            depth_image = torch.clamp(depth_image, min=0)
+            depth_image = np.array(depth_image.squeeze(0).cpu())
+
+            _, semantic_image = torch.max(semantic_out, 1)
+            
+        semantic_image = as_numpy(semantic_image.squeeze(0).cpu())
+        semantic_image = np.vectorize(self.mapping_dict.get)(semantic_image)
+        # Convert the outputs to cv2 images
+        semantic_image = colorEncode(semantic_image, self.colors).astype(np.uint8)
+        semantic_image = cv2.resize(semantic_image, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
+
+        # Convert back to ROS Image messages
+        seg_msg = Image()
+        seg_msg.header, seg_msg.encoding  = data.header, "rgb8"
+        seg_msg.height, seg_msg.width = semantic_image.shape[0], semantic_image.shape[1]
+        seg_msg.step, seg_msg.data = semantic_image.shape[1]*3,  semantic_image.tobytes()
+    
+
+        depth_msg = Image()
+        depth_msg.header, depth_msg.encoding = data.header, "32FC1"
+        depth_msg.height, depth_msg.width = depth_image.shape[0], depth_image.shape[1]
+        depth_msg.step, depth_msg.data = depth_image.shape[1] * 4, (depth_image.astype("float32")*.967).tobytes()
+        # depth_msg.step, depth_msg.data = depth_image.shape[1] * 4, (depth_image.astype("float32")*.625).tobytes()
+        # Publish the results
+        self.semantic_pub.publish(seg_msg)
+        self.depth_pub.publish(depth_msg)    
+        # scaled_depth = depth_image.astype("float32") * 0.625
+        # min_depth = scaled_depth.min()
+        # max_depth = scaled_depth.max()
+        # print(f"Depth range: {min_depth} to {max_depth}")
+        # h 2.40, w = 1.70
+
+    def spin(self):
+        rospy.spin()
+
+if __name__ == '__main__':
+    try:
+        node = MultiTaskNetworkNode()
+        node.spin()
+    except KeyboardInterrupt:
+        print("Shutting Down Node!!!")
+        sys.exit(0)
