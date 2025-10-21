@@ -134,7 +134,7 @@ Use `model_variant:=lightweight` to run the smaller M2H head when GPU budget is 
 ## Roadmap
 - Add automated weight download tooling.
 - Provide example bag / RViz configuration.
-- Document CPU-only deployment tips.
+- Release compatible Mono-Hydra version. 
 
 
 ## Citation
