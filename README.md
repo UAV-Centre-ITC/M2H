@@ -138,11 +138,8 @@ A zipped ROS bag covering the 2nd-floor loop of the old ITC building can be down
 - `data/`: Color maps and small auxiliary resources.
 
 ## Roadmap
-- Bundle a lightweight demo (sample bag + RViz config) to showcase segmentation/depth outputs.
-- Mono-Hydra to ship a compatible release and documentation.
-- Release the m2h_perf lightweight weights alongside the default model.
-- Export ONNX variants of both model flavors and add tests/examples for running them.
-
+- Improve the mono VIO module to remain reliable under fast rotations and textureless indoor motion.
+- Enhance M2H performance to better enforce temporal consistency across successive frames.
 
 ## Citation
 If you use this repository or the M2H model in your research, please cite:
