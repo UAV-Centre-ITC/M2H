@@ -115,7 +115,7 @@ Use `model_variant:=lightweight` to run the smaller M2H head when GPU budget is 
 | `image_topic` | `/camera/image_raw` | Source RGB topic. |
 | `image_depth_topic` | `/camera/image_depth` | Depth prediction output topic. |
 | `image_semantic_topic` | `/camera/image_segmented` | Semantic prediction output topic. |
-| `model_path` | `$(find m2h)/scripts/checkpoints/<br>m2h_indoor.pt` | Path to the checkpoint weights. |
+| `model_path` | `$(find m2h)/scripts/checkpoints/m2h_indoor.pt` | Path to the checkpoint weights. |
 | `model_variant` | `default` | Selects the model head (`default` full capacity, `lightweight` M2H-small). |
 | `feed_width` / `feed_height` | `224` | Network input resolution prior to inference. |
 | `skip_frequency` | `7` | Process every `n`th frame (set to `1` to use every frame). |
