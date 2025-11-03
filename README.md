@@ -33,6 +33,8 @@ The M2H architecture is built around a shared Vision Transformer (ViT) encoder b
 - Demonstrates consistent improvements over both single-task and prior multi-task baselines.
 
 ## Results Summary
+
+![M2H with NYUDv2](images/img1.png)
 **NYUDv2 (validation) — multi-task comparison**
 
 | Method | Semseg mIoU ↑ | Depth RMSE ↓ | Normals mean ↓ | Boundary odsF ↑ |
@@ -108,6 +110,10 @@ roslaunch m2h m2h.launch image_topic:=/camera/image_raw
 The node subscribes to the RGB stream and publishes semantically-colored segmentation maps and depth images. Remap the topics in the launch file or via command-line arguments to match your setup.
 
 Use `model_variant:=lightweight` to run the smaller M2H head when GPU budget is limited.
+
+## Sample Data
+A zipped ROS bag covering the 2nd-floor loop of the old ITC building can be downloaded from
+[this SURFdrive link](https://surfdrive.surf.nl/s/baJM4fj3DaWwg3T). Download and unzip the archive to obtain the bag file, then replay it with your preferred launch configuration to verify the pipeline end-to-end.
 
 ## Parameters
 | Name | Default | Description |
