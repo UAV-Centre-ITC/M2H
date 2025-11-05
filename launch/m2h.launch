@@ -1,6 +1,8 @@
 <launch>
 <arg name="image_topic" default="/camera/color/image_raw"/>
 <arg name="model_path" default="$(find m2h)/scripts/checkpoints/m2h_indoor.pt"/>
+<!-- <arg name="model_path" default="$(find m2h)/scripts/checkpoints/m2h_nyudv2.pt"/> -->
+<!-- <arg name="model_path" default="$(find m2h)/scripts/checkpoints/best_final_hypersim_rmse_3.1571_miou_0.5283.pt"/> -->
 <arg name="feed_width" default="224"/>
 <arg name="feed_height" default="224"/>
 <arg name="skip_frequency" default="7"/>
